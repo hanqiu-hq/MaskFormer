@@ -101,19 +101,20 @@ class MaskFormerHead(nn.Module):
                 if cfg.MODEL.MASK_FORMER.TRANSFORMER_IN_FEATURE == "transformer_encoder"
                 else input_shape[cfg.MODEL.MASK_FORMER.TRANSFORMER_IN_FEATURE].channels,
                 mask_classification=True,
+                smca=cfg.MODEL.SEM_SEG_HEAD.SMCA,
             ),
         }
 
-    def forward(self, features):
-        return self.layers(features)
+    def forward(self, features, image_sizes=None):
+        return self.layers(features, image_sizes)
 
-    def layers(self, features):
+    def layers(self, features, image_sizes=None):
         mask_features, transformer_encoder_features = self.pixel_decoder.forward_features(features)
         if self.transformer_in_feature == "transformer_encoder":
             assert (
                 transformer_encoder_features is not None
             ), "Please use the TransformerEncoderPixelDecoder."
-            predictions = self.predictor(transformer_encoder_features, mask_features)
+            predictions = self.predictor(transformer_encoder_features, mask_features, image_sizes)
         else:
-            predictions = self.predictor(features[self.transformer_in_feature], mask_features)
+            predictions = self.predictor(features[self.transformer_in_feature], mask_features, image_sizes)
         return predictions

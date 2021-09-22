@@ -1,5 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-# Modified by Bowen Cheng from: https://github.com/facebookresearch/detr/blob/master/models/transformer.py
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
 Transformer class.
 
@@ -9,14 +8,16 @@ Copy-paste from torch.nn.Transformer with modifications:
     * decoder returns a stack of activations from all decoding layers
 """
 import copy
-from typing import List, Optional
+from typing import Optional, List
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import nn, Tensor
+
+from .attention_layer import GaussianMultiheadAttention
 
 
-class Transformer(nn.Module):
+class TransformerSMCA(nn.Module):
     def __init__(
             self,
             d_model=512,
@@ -28,6 +29,7 @@ class Transformer(nn.Module):
             activation="relu",
             normalize_before=False,
             return_intermediate_dec=False,
+            smooth=8,
     ):
         super().__init__()
 
@@ -37,18 +39,25 @@ class Transformer(nn.Module):
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
-        decoder_layer = TransformerDecoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation, normalize_before
-        )
+        decoder_layers = []
+        for layer_index in range(num_decoder_layers):
+            decoder_layer = TransformerDecoderLayer(
+                smooth, layer_index, d_model, nhead, dim_feedforward, dropout, activation, normalize_before
+            )
+            decoder_layers.append(decoder_layer)
         decoder_norm = nn.LayerNorm(d_model)
         self.decoder = TransformerDecoder(
-            decoder_layer,
+            decoder_layers,
             num_decoder_layers,
             decoder_norm,
             return_intermediate=return_intermediate_dec,
         )
 
         self._reset_parameters()
+        for layer_index in range(num_decoder_layers):
+            nn.init.zeros_(self.decoder.layers[layer_index].point3.weight)
+            with torch.no_grad():
+                nn.init.ones_(self.decoder.layers[layer_index].point3.bias)
 
         self.d_model = d_model
         self.nhead = nhead
@@ -59,8 +68,17 @@ class Transformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, src, mask, query_embed, pos_embed, image_sizes):
+        h_w = torch.stack([torch.stack(image_sizes)[:, 1],
+                           torch.stack(image_sizes)[:, 0]], dim=-1)
+        h_w = h_w.unsqueeze(0)
+
         # flatten NxCxHxW to HWxNxC
         bs, c, h, w = src.shape
+
+        grid_y, grid_x = torch.meshgrid(torch.arange(0, h), torch.arange(0, w))
+        grid = torch.stack((grid_x, grid_y), 2).float().to(src.device)
+        grid = grid.reshape(-1, 2).unsqueeze(1).repeat(1, bs * 8, 1)
+
         src = src.flatten(2).permute(2, 0, 1)
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
@@ -70,7 +88,7 @@ class Transformer(nn.Module):
         tgt = torch.zeros_like(query_embed)
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
         hs = self.decoder(
-            tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed
+            grid, h_w, tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed
         )
         return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
 
@@ -105,13 +123,15 @@ class TransformerEncoder(nn.Module):
 class TransformerDecoder(nn.Module):
     def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False):
         super().__init__()
-        self.layers = _get_clones(decoder_layer, num_layers)
+        self.layers = nn.ModuleList(decoder_layer)
         self.num_layers = num_layers
         self.norm = norm
         self.return_intermediate = return_intermediate
 
     def forward(
             self,
+            grid,
+            h_w,
             tgt,
             memory,
             tgt_mask: Optional[Tensor] = None,
@@ -125,8 +145,11 @@ class TransformerDecoder(nn.Module):
 
         intermediate = []
 
+        point_sigmoid_ref = None
         for layer in self.layers:
-            output = layer(
+            output, point_sigmoid_ref = layer(
+                grid,
+                h_w,
                 output,
                 memory,
                 tgt_mask=tgt_mask,
@@ -135,6 +158,7 @@ class TransformerDecoder(nn.Module):
                 memory_key_padding_mask=memory_key_padding_mask,
                 pos=pos,
                 query_pos=query_pos,
+                point_ref_previous=point_sigmoid_ref
             )
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
@@ -230,6 +254,8 @@ class TransformerEncoderLayer(nn.Module):
 class TransformerDecoderLayer(nn.Module):
     def __init__(
             self,
+            smooth,
+            layer_index,
             d_model,
             nhead,
             dim_feedforward=2048,
@@ -239,18 +265,29 @@ class TransformerDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
-        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.multihead_attn = GaussianMultiheadAttention(d_model, nhead, dropout=dropout)
         # Implementation of Feedforward model
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
+        self.smooth = smooth
+
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
+        self.norm4 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
+
+        if layer_index == 0:
+            self.point1 = MLP(256, 256, 2, 3)
+            self.point2 = nn.Linear(d_model, 2 * 8)
+        else:
+            self.point2 = nn.Linear(d_model, 2 * 8)
+        self.layer_index = layer_index
+        self.point3 = nn.Linear(d_model, 16)
 
         self.activation = _get_activation_fn(activation)
         self.normalize_before = normalize_before
@@ -260,6 +297,8 @@ class TransformerDecoderLayer(nn.Module):
 
     def forward_post(
             self,
+            grid,
+            h_w,
             tgt,
             memory,
             tgt_mask: Optional[Tensor] = None,
@@ -268,26 +307,51 @@ class TransformerDecoderLayer(nn.Module):
             memory_key_padding_mask: Optional[Tensor] = None,
             pos: Optional[Tensor] = None,
             query_pos: Optional[Tensor] = None,
+            point_ref_previous: Optional[Tensor] = None,
     ):
+        tgt_len = tgt.shape[0]
+
+        out = self.norm4(tgt + query_pos)
+        point_sigmoid_offset = self.point2(out)
+
         q = k = self.with_pos_embed(tgt, query_pos)
         tgt2 = self.self_attn(
             q, k, value=tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask
         )[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
+
+        if self.layer_index == 0:
+            point_sigmoid_ref = self.point1(out).sigmoid()
+            point_sigmoid_ref = (h_w - 0) * point_sigmoid_ref / 32
+            point_sigmoid_ref = point_sigmoid_ref.repeat(1, 1, 8)
+        else:
+            point_sigmoid_ref = point_ref_previous
+
+        point = point_sigmoid_ref + point_sigmoid_offset
+        point = point.view(tgt_len, -1, 2)
+        distance = (point.unsqueeze(1) - grid.unsqueeze(0)).pow(2)
+
+        scale = self.point3(out)
+        scale = scale * scale
+        scale = scale.reshape(tgt_len, -1, 2).unsqueeze(1)
+        distance = (distance * scale).sum(-1)
+        gaussian = -(distance - 0).abs() / self.smooth
+
         tgt2 = self.multihead_attn(
             query=self.with_pos_embed(tgt, query_pos),
             key=self.with_pos_embed(memory, pos),
             value=memory,
             attn_mask=memory_mask,
             key_padding_mask=memory_key_padding_mask,
+            gaussian=[gaussian]
         )[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
-        return tgt
+        return tgt, point_sigmoid_ref
 
     def forward_pre(
             self,
@@ -310,9 +374,8 @@ class TransformerDecoderLayer(nn.Module):
         tgt2 = self.multihead_attn(
             query=self.with_pos_embed(tgt2, query_pos),
             key=self.with_pos_embed(memory, pos),
-            value=memory,
-            attn_mask=memory_mask,
-            key_padding_mask=memory_key_padding_mask,
+            value=memory, attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask
         )[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt2 = self.norm3(tgt)
@@ -322,6 +385,8 @@ class TransformerDecoderLayer(nn.Module):
 
     def forward(
             self,
+            grid,
+            h_w,
             tgt,
             memory,
             tgt_mask: Optional[Tensor] = None,
@@ -330,6 +395,7 @@ class TransformerDecoderLayer(nn.Module):
             memory_key_padding_mask: Optional[Tensor] = None,
             pos: Optional[Tensor] = None,
             query_pos: Optional[Tensor] = None,
+            point_ref_previous: Optional[Tensor] = None,
     ):
         if self.normalize_before:
             return self.forward_pre(
@@ -343,6 +409,8 @@ class TransformerDecoderLayer(nn.Module):
                 query_pos,
             )
         return self.forward_post(
+            grid,
+            h_w,
             tgt,
             memory,
             tgt_mask,
@@ -351,7 +419,23 @@ class TransformerDecoderLayer(nn.Module):
             memory_key_padding_mask,
             pos,
             query_pos,
+            point_ref_previous,
         )
+
+
+class MLP(nn.Module):
+    """ Very simple multi-layer perceptron (also called FFN)"""
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x
 
 
 def _get_clones(module, N):

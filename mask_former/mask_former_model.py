@@ -166,7 +166,7 @@ class MaskFormer(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        outputs = self.sem_seg_head(features)
+        outputs = self.sem_seg_head(features, images.image_sizes)
 
         if self.training:
             # mask classification target

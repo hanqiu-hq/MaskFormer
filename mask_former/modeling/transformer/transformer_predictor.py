@@ -10,6 +10,7 @@ from detectron2.layers import Conv2d
 
 from .position_encoding import PositionEmbeddingSine
 from .transformer import Transformer
+from .transformer_smca import TransformerSMCA
 
 
 class TransformerPredictor(nn.Module):
@@ -18,6 +19,7 @@ class TransformerPredictor(nn.Module):
         self,
         in_channels,
         mask_classification=True,
+        smca=False,
         *,
         num_classes: int,
         hidden_dim: int,
@@ -59,16 +61,28 @@ class TransformerPredictor(nn.Module):
         N_steps = hidden_dim // 2
         self.pe_layer = PositionEmbeddingSine(N_steps, normalize=True)
 
-        transformer = Transformer(
-            d_model=hidden_dim,
-            dropout=dropout,
-            nhead=nheads,
-            dim_feedforward=dim_feedforward,
-            num_encoder_layers=enc_layers,
-            num_decoder_layers=dec_layers,
-            normalize_before=pre_norm,
-            return_intermediate_dec=deep_supervision,
-        )
+        if not smca:
+            transformer = Transformer(
+                d_model=hidden_dim,
+                dropout=dropout,
+                nhead=nheads,
+                dim_feedforward=dim_feedforward,
+                num_encoder_layers=enc_layers,
+                num_decoder_layers=dec_layers,
+                normalize_before=pre_norm,
+                return_intermediate_dec=deep_supervision,
+            )
+        else:
+            transformer = TransformerSMCA(
+                d_model=hidden_dim,
+                dropout=dropout,
+                nhead=nheads,
+                dim_feedforward=dim_feedforward,
+                num_encoder_layers=enc_layers,
+                num_decoder_layers=dec_layers,
+                normalize_before=pre_norm,
+                return_intermediate_dec=deep_supervision,
+            )
 
         self.num_queries = num_queries
         self.transformer = transformer
@@ -111,12 +125,12 @@ class TransformerPredictor(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features):
+    def forward(self, x, mask_features, image_sizes):
         pos = self.pe_layer(x)
 
         src = x
         mask = None
-        hs, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos)
+        hs, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos, image_sizes)
 
         if self.mask_classification:
             outputs_class = self.class_embed(hs)
