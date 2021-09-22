@@ -68,9 +68,8 @@ class TransformerSMCA(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, src, mask, query_embed, pos_embed, image_sizes):
-        h_w = torch.stack([torch.stack(image_sizes)[:, 1],
-                           torch.stack(image_sizes)[:, 0]], dim=-1)
-        h_w = h_w.unsqueeze(0)
+        h_w = torch.stack([torch.tensor(image_sizes)[:, 1], torch.tensor(image_sizes)[:, 0]], dim=-1)
+        h_w = h_w.float().to(src.device).unsqueeze(0)
 
         # flatten NxCxHxW to HWxNxC
         bs, c, h, w = src.shape
