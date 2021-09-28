@@ -1,0 +1,5 @@
+_BASE_: ../maskformer_panoptic_R50_bs8_50e_smca.yaml
+MODEL:
+  BACKBONE:
+    NAME: "Container"
+  WEIGHTS: ""

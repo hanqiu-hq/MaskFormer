@@ -85,3 +85,18 @@ def add_mask_former_config(cfg):
     cfg.MODEL.SWIN.APE = False
     cfg.MODEL.SWIN.PATCH_NORM = True
     cfg.MODEL.SWIN.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
+
+    # swin transformer backbone
+    cfg.MODEL.CONTAINER = CN()
+    cfg.MODEL.CONTAINER.PRETRAIN_IMG_SIZE = [224, 56, 28, 14]
+    cfg.MODEL.CONTAINER.PATCH_SIZE = [4, 2, 2, 2]
+    cfg.MODEL.CONTAINER.EMBED_DIM = [64, 128, 320, 512]
+    cfg.MODEL.CONTAINER.DEPTHS = [3, 4, 8, 3]
+    cfg.MODEL.CONTAINER.NUM_HEADS = 16
+    cfg.MODEL.CONTAINER.MLP_RATIO = [8, 8, 4, 4]
+    cfg.MODEL.CONTAINER.QKV_BIAS = True
+    cfg.MODEL.CONTAINER.QK_SCALE = None
+    cfg.MODEL.CONTAINER.DROP_RATE = 0.0
+    cfg.MODEL.CONTAINER.ATTN_DROP_RATE = 0.0
+    cfg.MODEL.CONTAINER.DROP_PATH_RATE = 0.1
+    cfg.MODEL.CONTAINER.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
