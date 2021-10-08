@@ -103,7 +103,7 @@ class MaskFormer(nn.Module):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
             weight_dict.update(aux_weight_dict)
 
-        losses = ["labels", "masks"]
+        losses = ["labels", "masks", "boxes"]
 
         criterion = SetCriterion(
             sem_seg_head.num_classes,
@@ -226,15 +226,21 @@ class MaskFormer(nn.Module):
     def prepare_targets(self, targets, images):
         h, w = images.tensor.shape[-2:]
         new_targets = []
-        for targets_per_image in targets:
+        for (targets_per_image, image_sizes) in zip(targets, images.image_sizes):
             # pad gt
             gt_masks = targets_per_image.gt_masks
             padded_masks = torch.zeros((gt_masks.shape[0], h, w), dtype=gt_masks.dtype, device=gt_masks.device)
             padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
+            gt_boxes = targets_per_image.gt_boxes
+            if gt_boxes is not None:
+                scale = torch.stack([image_sizes[1], image_sizes[0], image_sizes[1], image_sizes[0]], dim=0)
+                gt_boxes = (gt_boxes / scale).clamp(min=0, max=1)
+
             new_targets.append(
                 {
                     "labels": targets_per_image.gt_classes,
                     "masks": padded_masks,
+                    "boxes": gt_boxes,
                 }
             )
         return new_targets

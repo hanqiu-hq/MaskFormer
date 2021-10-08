@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
-Transformer class.
+DETR Transformer class.
 
 Copy-paste from torch.nn.Transformer with modifications:
     * positional encodings are passed in MHattention
@@ -17,7 +17,7 @@ from torch import nn, Tensor
 from .attention_layer import GaussianMultiheadAttention
 
 
-class TransformerSMCA(nn.Module):
+class TransformerSMCAPoint(nn.Module):
     def __init__(
             self,
             d_model=512,
@@ -83,10 +83,10 @@ class TransformerSMCA(nn.Module):
 
         tgt = torch.zeros_like(query_embed)
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
-        hs = self.decoder(
+        hs, points = self.decoder(
             grid, h_w, tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed
         )
-        return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
+        return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w), points.transpose(0, 1)
 
 
 class TransformerEncoder(nn.Module):
@@ -141,9 +141,10 @@ class TransformerDecoder(nn.Module):
 
         intermediate = []
 
+        points = []
         point_sigmoid_ref = None
         for layer in self.layers:
-            output, point_sigmoid_ref = layer(
+            output, point, point_sigmoid_ref = layer(
                 grid,
                 h_w,
                 output,
@@ -156,6 +157,7 @@ class TransformerDecoder(nn.Module):
                 query_pos=query_pos,
                 point_ref_previous=point_sigmoid_ref
             )
+            points.append(point)
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
 
@@ -166,7 +168,7 @@ class TransformerDecoder(nn.Module):
                 intermediate.append(output)
 
         if self.return_intermediate:
-            return torch.stack(intermediate)
+            return torch.stack(intermediate), points[0]
 
         return output.unsqueeze(0)
 
@@ -318,7 +320,8 @@ class TransformerDecoderLayer(nn.Module):
         tgt = self.norm1(tgt)
 
         if self.layer_index == 0:
-            point_sigmoid_ref = self.point1(out).sigmoid()
+            point_sigmoid_ref_inter = self.point1(out)
+            point_sigmoid_ref = point_sigmoid_ref_inter.sigmoid()
             point_sigmoid_ref = (h_w - 0) * point_sigmoid_ref / 32
             point_sigmoid_ref = point_sigmoid_ref.repeat(1, 1, 8)
         else:
@@ -347,7 +350,10 @@ class TransformerDecoderLayer(nn.Module):
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
-        return tgt, point_sigmoid_ref
+        if self.layer_index == 0:
+            return tgt, point_sigmoid_ref_inter, point_sigmoid_ref
+        else:
+            return tgt, None, point_sigmoid_ref
 
     def forward_pre(
             self,

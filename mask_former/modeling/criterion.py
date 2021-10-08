@@ -10,6 +10,7 @@ from torch import nn
 from detectron2.utils.comm import get_world_size
 
 from ..utils.misc import is_dist_avail_and_initialized, nested_tensor_from_tensor_list
+from ..utils import box_ops
 
 
 def dice_loss(inputs, targets, num_masks):
@@ -84,6 +85,27 @@ class SetCriterion(nn.Module):
         empty_weight[-1] = self.eos_coef
         self.register_buffer("empty_weight", empty_weight)
 
+    def loss_boxes(self, outputs, targets, indices, num_boxes):
+        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
+           targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
+           The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
+        """
+        assert 'pred_boxes' in outputs
+        idx = self._get_src_permutation_idx(indices)
+        src_boxes = outputs['pred_boxes'][idx]
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+
+        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
+
+        losses = {}
+        losses['loss_bbox'] = loss_bbox.sum() / num_boxes
+
+        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
+            box_ops.box_cxcywh_to_xyxy(src_boxes),
+            box_ops.box_cxcywh_to_xyxy(target_boxes)))
+        losses['loss_giou'] = loss_giou.sum() / num_boxes
+        return losses
+
     def loss_labels(self, outputs, targets, indices, num_masks):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
@@ -145,7 +167,7 @@ class SetCriterion(nn.Module):
         return batch_idx, tgt_idx
 
     def get_loss(self, loss, outputs, targets, indices, num_masks):
-        loss_map = {"labels": self.loss_labels, "masks": self.loss_masks}
+        loss_map = {"labels": self.loss_labels, "masks": self.loss_masks, "boxes": self.loss_boxes}
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
 

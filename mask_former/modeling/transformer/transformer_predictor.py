@@ -10,7 +10,7 @@ from detectron2.layers import Conv2d
 
 from .position_encoding import PositionEmbeddingSine
 from .transformer import Transformer
-from .transformer_smca import TransformerSMCA
+from .transformer_smcapoint import TransformerSMCAPoint
 
 
 class TransformerPredictor(nn.Module):
@@ -61,6 +61,7 @@ class TransformerPredictor(nn.Module):
         N_steps = hidden_dim // 2
         self.pe_layer = PositionEmbeddingSine(N_steps, normalize=True)
 
+        self.smca = smca
         if not smca:
             transformer = Transformer(
                 d_model=hidden_dim,
@@ -73,7 +74,7 @@ class TransformerPredictor(nn.Module):
                 return_intermediate_dec=deep_supervision,
             )
         else:
-            transformer = TransformerSMCA(
+            transformer = TransformerSMCAPoint(
                 d_model=hidden_dim,
                 dropout=dropout,
                 nhead=nheads,
@@ -83,6 +84,7 @@ class TransformerPredictor(nn.Module):
                 normalize_before=pre_norm,
                 return_intermediate_dec=deep_supervision,
             )
+            self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
 
         self.num_queries = num_queries
         self.transformer = transformer
@@ -130,13 +132,23 @@ class TransformerPredictor(nn.Module):
 
         src = x
         mask = None
-        hs, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos, image_sizes)
+        if not self.smca:
+            hs, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos, image_sizes)
+            points = None
+        else:
+            hs, memory, points = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos, image_sizes)
 
         if self.mask_classification:
             outputs_class = self.class_embed(hs)
             out = {"pred_logits": outputs_class[-1]}
         else:
             out = {}
+
+        if self.smca:
+            outputs_coord = self.bbox_embed(hs[-1])
+            outputs_coord[..., :2] = outputs_coord[..., :2] + points
+            outputs_coord = outputs_coord.sigmoid()
+            out["pred_boxes"] = outputs_coord
 
         if self.aux_loss:
             # [l, bs, queries, embed]
