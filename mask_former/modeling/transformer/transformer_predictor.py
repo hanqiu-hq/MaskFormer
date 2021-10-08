@@ -144,12 +144,6 @@ class TransformerPredictor(nn.Module):
         else:
             out = {}
 
-        if self.smca:
-            outputs_coord = self.bbox_embed(hs[-1])
-            outputs_coord[..., :2] = outputs_coord[..., :2] + points
-            outputs_coord = outputs_coord.sigmoid()
-            out["pred_boxes"] = outputs_coord
-
         if self.aux_loss:
             # [l, bs, queries, embed]
             mask_embed = self.mask_embed(hs)
@@ -164,6 +158,19 @@ class TransformerPredictor(nn.Module):
             mask_embed = self.mask_embed(hs[-1])
             outputs_seg_masks = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
             out["pred_masks"] = outputs_seg_masks
+
+        if self.smca:
+            outputs_coord = self.bbox_embed(hs)
+            points = points.unsqueeze(0).repeat(hs.shape[0], 1, 1, 1)
+            outputs_coord[..., :2] = outputs_coord[..., :2] + points
+            outputs_coord = outputs_coord.sigmoid()
+            out["pred_boxes"] = outputs_coord[-1]
+            if self.aux_loss:
+                aux_outputs = out["aux_outputs"]
+                for auxout, oc in zip(aux_outputs, outputs_coord[:-1]):
+                    auxout["pred_boxes"] = oc
+                out["aux_outputs"] = aux_outputs
+
         return out
 
     @torch.jit.unused
