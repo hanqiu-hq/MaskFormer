@@ -231,9 +231,9 @@ class MaskFormer(nn.Module):
             gt_masks = targets_per_image.gt_masks
             padded_masks = torch.zeros((gt_masks.shape[0], h, w), dtype=gt_masks.dtype, device=gt_masks.device)
             padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
-            gt_boxes = targets_per_image.gt_boxes
+            gt_boxes = targets_per_image.gt_boxes.tensor
             if gt_boxes is not None:
-                image_size = torch.tensor(image_size).to(self.device)
+                image_size = torch.tensor(image_size).to(self.device).float()
                 scale = torch.stack([image_size[1], image_size[0], image_size[1], image_size[0]], dim=0)
                 gt_boxes = (gt_boxes / scale).clamp(min=0, max=1)
 
