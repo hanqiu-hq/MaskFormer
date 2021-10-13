@@ -67,6 +67,8 @@ def add_mask_former_config(cfg):
     cfg.MODEL.SEM_SEG_HEAD.PIXEL_DECODER_NAME = "BasePixelDecoder"
     # smca guassian attention
     cfg.MODEL.SEM_SEG_HEAD.SMCA = False
+    cfg.MODEL.SEM_SEG_HEAD.LEARN_SMOOTH = False
+    cfg.MODEL.SEM_SEG_HEAD.HW_SCALE = False
 
     # swin transformer backbone
     cfg.MODEL.SWIN = CN()
