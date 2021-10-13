@@ -102,6 +102,8 @@ class MaskFormerHead(nn.Module):
                 else input_shape[cfg.MODEL.MASK_FORMER.TRANSFORMER_IN_FEATURE].channels,
                 mask_classification=True,
                 smca=cfg.MODEL.SEM_SEG_HEAD.SMCA,
+                learn_smooth=cfg.MODEL.SEM_SEG_HEAD.LEARN_SMOOTH,
+                hw_scale=cfg.MODEL.SEM_SEG_HEAD.HW_SCALE
             ),
         }
 

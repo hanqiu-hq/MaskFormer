@@ -10,6 +10,7 @@ from detectron2.layers import Conv2d
 
 from .position_encoding import PositionEmbeddingSine
 from .transformer import Transformer
+from .transformer_smca import TransformerSMCA
 from .transformer_smcapoint import TransformerSMCAPoint
 
 
@@ -20,6 +21,8 @@ class TransformerPredictor(nn.Module):
         in_channels,
         mask_classification=True,
         smca=False,
+        learn_smooth=False,
+        hw_scale=False,
         *,
         num_classes: int,
         hidden_dim: int,
@@ -74,7 +77,7 @@ class TransformerPredictor(nn.Module):
                 return_intermediate_dec=deep_supervision,
             )
         else:
-            transformer = TransformerSMCAPoint(
+            transformer = TransformerSMCA(
                 d_model=hidden_dim,
                 dropout=dropout,
                 nhead=nheads,
@@ -83,6 +86,8 @@ class TransformerPredictor(nn.Module):
                 num_decoder_layers=dec_layers,
                 normalize_before=pre_norm,
                 return_intermediate_dec=deep_supervision,
+                learn_smooth=learn_smooth,
+                hw_scale=hw_scale,
             )
             self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
 
@@ -132,11 +137,7 @@ class TransformerPredictor(nn.Module):
 
         src = x
         mask = None
-        if not self.smca:
-            hs, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos, image_sizes)
-            points = None
-        else:
-            hs, memory, points = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos, image_sizes)
+        hs, memory = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos, image_sizes)
 
         if self.mask_classification:
             outputs_class = self.class_embed(hs)
@@ -158,18 +159,6 @@ class TransformerPredictor(nn.Module):
             mask_embed = self.mask_embed(hs[-1])
             outputs_seg_masks = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
             out["pred_masks"] = outputs_seg_masks
-
-        if self.smca:
-            outputs_coord = self.bbox_embed(hs)
-            points = points.unsqueeze(0).repeat(hs.shape[0], 1, 1, 1)
-            outputs_coord[..., :2] = outputs_coord[..., :2] + points
-            outputs_coord = outputs_coord.sigmoid()
-            out["pred_boxes"] = outputs_coord[-1]
-            if self.aux_loss:
-                aux_outputs = out["aux_outputs"]
-                for auxout, oc in zip(aux_outputs, outputs_coord[:-1]):
-                    auxout["pred_boxes"] = oc
-                out["aux_outputs"] = aux_outputs
 
         return out
 

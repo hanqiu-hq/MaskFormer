@@ -29,7 +29,9 @@ class TransformerSMCA(nn.Module):
             activation="relu",
             normalize_before=False,
             return_intermediate_dec=False,
-            smooth=8,
+            smooth=8.,
+            learn_smooth=False,
+            hw_scale=False,
     ):
         super().__init__()
 
@@ -42,7 +44,7 @@ class TransformerSMCA(nn.Module):
         decoder_layers = []
         for layer_index in range(num_decoder_layers):
             decoder_layer = TransformerDecoderLayer(
-                smooth, layer_index, d_model, nhead, dim_feedforward, dropout, activation, normalize_before
+                smooth, layer_index, d_model, nhead, dim_feedforward, dropout, activation, normalize_before, learn_smooth, hw_scale
             )
             decoder_layers.append(decoder_layer)
         decoder_norm = nn.LayerNorm(d_model)
@@ -258,6 +260,8 @@ class TransformerDecoderLayer(nn.Module):
             dropout=0.1,
             activation="relu",
             normalize_before=False,
+            learn_smooth=False,
+            hw_scale=False,
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
@@ -267,7 +271,13 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-        self.smooth = smooth
+        if learn_smooth:
+            self.smooth = nn.Parameter(torch.tensor(smooth))
+        else:
+            self.smooth = smooth
+        if hw_scale:
+            self.smooth = nn.Parameter(torch.tensor(1.0))
+        self.hw_scale = hw_scale
 
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
@@ -329,9 +339,15 @@ class TransformerDecoderLayer(nn.Module):
         distance = (point.unsqueeze(1) - grid.unsqueeze(0)).pow(2)
 
         scale = self.point3(out)
-        scale = scale * scale
-        scale = scale.reshape(tgt_len, -1, 2).unsqueeze(1)
-        distance = (distance * scale).sum(-1)
+        if self.hw_scale:
+            scale = scale.sigmoid()
+            scale = (scale * (h_w.repeat(1, 1, 8)) / 32).pow(2)
+            scale = scale.reshape(tgt_len, 1, -1, 2).clamp(min=1e-4)
+            distance = (distance / scale).sum(-1)
+        else:
+            scale = scale * scale
+            scale = scale.reshape(tgt_len, -1, 2).unsqueeze(1)
+            distance = (distance * scale).sum(-1)
         gaussian = -(distance - 0).abs() / self.smooth
 
         tgt2 = self.multihead_attn(
